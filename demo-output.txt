@@ -1,0 +1,135 @@
+
+=== model.py ===
+874049 numbers in the model
+{'steps': 4000, 'held_loss': 1.6104328632354736, 'seconds': 874.7296071052551}
+
+=== workload.py ===
+1000 requests
+prompt: mean 41.0 tokens, shortest 8, longest 200
+answer: mean 79.0 tokens, shortest 8, longest 499
+prompt and answer together: mean 119.9, longest 512, limit 512
+answers under 100 tokens: 747 of 1000
+first prompt: 'PETRUCHIO:\nNot'
+
+=== step1_notes.py ===
+prompt: 'Of Pisa, sir; son to Vincentio.\n\nBAPTIST'
+no notes: 95,800 tokens pushed through the model for 400 new ones, 3.29 s
+notes:    439 tokens pushed through the model for 400 new ones, 1.28 s
+same text: True    2.6 times faster
+answer starts: 'A:\nThis man: for our confine town adver your pass.\n\nPETRUCHIO:\nWhat can the pray deceit of blood, blooding;\nWhich must b'
+
+one token of notes: 4 layers x 2 lists (key, value) x 128 numbers x 8 bytes = 8,192 bytes
+the longest text, 512 tokens: 4.2 MB of notes
+the model itself: 874,049 numbers, 7.0 MB
+the paper's 13-billion model: 40 layers x 2 x 5,120 numbers x 2 bytes = 819,200 bytes a token, 1.6 GB for 2,048 tokens
+
+=== step2_batch.py ===
+ at once   one step  tokens a second  against one
+       1    0.79 ms            1,259         1.0x
+       2    1.13 ms            1,774         1.4x
+       4    1.45 ms            2,754         2.2x
+       8    1.64 ms            4,887         3.9x
+      16    2.65 ms            6,028         4.8x
+      32    4.79 ms            6,677         5.3x
+      64    8.72 ms            7,337         5.8x
+
+=== step3_queue.py ===
+memory for notes: 8,192 places. A row of 512 for everyone inside: 16 seats.
+one at a time               77952 steps   129.2 s      611 tokens/s  inside   1.0  memory with notes   1.4 %  wait  59.4 s
+groups of 16, wait for all  17060 steps    83.2 s      949 tokens/s  inside   4.6  memory with notes   6.5 %  wait  43.9 s
+a free seat is filled        4938 steps    78.3 s     1009 tokens/s  inside  16.0  memory with notes  22.5 %  wait  27.1 s
+
+groups of 16: on average 4.6 of the 16 seats were writing. The rest had finished and waited.
+a free seat is filled: 16.0 of 16.   steps: 77,952 -> 17,060 -> 4,938
+average wait for the full answer: 59.4 s -> 43.9 s -> 27.1 s
+same answers in all three: True
+
+=== step4_memory.py ===
+row length                         inside   notes  for later  never used   free  steps  seconds
+always 512 (length unknown)          16.0   22.5%      14.8%       62.7%   0.0%   4938     78.3
+prompt + answer rounded up to 2^n    28.7   39.8%      26.5%       20.0%  13.7%   2905     22.6
+                                   2591 times the next request did not fit although enough places were free: no hole was long enough
+prompt + true answer (cheating)      36.9   50.6%      34.0%        0.5%  15.0%   2381     19.5
+                                   2016 times the next request did not fit although enough places were free: no hole was long enough
+
+notes:      places that hold the notes of a token
+for later:  reserved, and a token will land there before the request ends
+never used: reserved, and the request ends before it gets there
+free:       not handed out, most of it in holes between rows
+the paper (Fig. 2), share of the memory that holds notes: 20.4 %, 26.8 %, 38.2 % for the same three, 96.3 % for vLLM
+
+=== step5_pages.py ===
+512 blocks of 16 places
+request A, prompt of 92 tokens: blocks [153, 204, 347, 134, 33, 356]
+request B, prompt of 25 tokens: blocks [403, 176]
+A fills its last block and needs one more: blocks [153, 204, 347, 134, 33, 356, 139]
+A's token 96 lies in its block number 6, that is block 139, place 0: memory place 2224
+at most 15 places of a request are empty. With a row of 512, request A would leave 413 empty.
+
+rows of 512                  4938 steps    78.3 s     1009 tokens/s  inside  16.0  memory with notes  22.5 %  wait  27.1 s
+pages of 16                  1520 steps    39.4 s     2004 tokens/s  inside  62.1  memory with notes  84.0 %  wait  16.0 s
+same answers: 1000 of 1000
+inside at once: 16.0 -> 62.1 (most: 126)     steps: 4,938 -> 1,520
+one step: 14.1 ms -> 22.2 ms, because more notes are read     seconds: 78.3 -> 39.4
+memory that holds notes: 22.5 % -> 84.0 %    (empty ends of last blocks 5.7 %, free blocks 10.3 %)
+
+=== step6_share.py ===
+every answer its own notes   1509 steps    34.7 s     2363 tokens/s  inside  59.1  memory with notes  87.5 %  wait  13.6 s
+prompt notes shared          1276 steps    52.7 s     1559 tokens/s  inside  69.9  memory with notes 102.4 %  wait  25.9 s
+prompts read: 1083 -> 463     blocks copied before a write: 668
+blocks saved by sharing, average over the run: 14.3 %
+inside at once: 59.1 -> 69.9     steps: 1,509 -> 1,276
+same answers: 1000 of 1000
+four different answers to prompt 0: 4 different
+the paper (Fig. 15): 6.1 % to 9.8 % saved with short prompts, 16.2 % to 30.5 % with long ones, more with beam search
+
+=== step7_full.py ===
+let in whoever fits now      1397 steps    66.4 s     1189 tokens/s  inside  69.8  memory with notes  93.2 %  wait  31.5 s
+keep 1 spare block each      1520 steps    39.4 s     2004 tokens/s  inside  62.1  memory with notes  84.0 %  wait  16.0 s
+
+let in whoever fits now: the memory was full 1,471 times. Each time the latest arrival was sent back to the queue.
+  its blocks were given away, and later 66,544 tokens were read a second time to write the notes again
+keep 1 spare block each: sent back 1 times, 56 tokens read again
+same answers: 1000 of 1000
+memory that holds notes: 93.2 % against 84.0 %, and still 66.4 s against 39.4 s
+
+=== step8_blocks.py ===
+ block  blocks  inside   notes  sent back  steps  one step  seconds
+     1    8192    75.3   99.6%        676   1329   37.3 ms     69.4
+     4    2048    72.6   96.6%        121   1363   29.5 ms     48.1
+    16     512    62.1   84.0%          1   1520   22.2 ms     39.4
+    64     128    39.9   54.7%          0   2202   14.7 ms     37.9
+   256      32    16.0   22.5%          0   4938   18.7 ms    104.3
+   512      16    16.0   22.5%          0   4938   31.6 ms    177.0
+a block of 512 is the reserved row again. vLLM uses 16.
+
+=== exercise.py ===
+ spare blocks per request  inside   notes  sent back  read again  steps  seconds
+                        0    69.8   93.2%       1471      66,544   1397     66.4
+                     0.25    68.6   91.8%        122       6,052   1421    124.1
+                      0.5    66.6   89.2%         22       1,040   1451    168.1
+                        1    62.1   84.0%          1          56   1520     39.4
+                        2    55.0   74.9%          0           0   1691    102.6
+                        4    45.0   61.6%          0           0   2001     82.6
+Your turn: change the line `keep = ...` in engine.py. The rule may look at the requests inside, but not at r.want.
+
+=== tests.py ===
+ok     notes in scattered blocks = the whole pass (largest difference of a score: 5.7e-14)
+ok     a block table gives the address 
+ok     a fork copies nothing 
+ok     a write into a shared block goes to a copy 
+ok     the first request keeps its notes 
+ok     the copy holds the old notes 
+ok     all blocks come back 
+ok     rows: the holes join back to one 
+ok     same answers: one at a time (150 of 150)
+ok     same answers: fixed groups (150 of 150)
+ok     same answers: rows, exact length (150 of 150)
+ok     same answers: pages of 16 (150 of 150)
+ok     same answers: pages of 4 (150 of 150)
+ok     sent back and read again: same answers (210 sent back, 150 of 150)
+ok     pages: all blocks come back 
+ok     shared prompt notes: same answers (160 of 160, prompts read 211 -> 136)
+ok     shared: all blocks come back 
+
+ALL TESTS PASS
